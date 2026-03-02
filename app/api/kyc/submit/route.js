@@ -1,9 +1,19 @@
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+export async function OPTIONS() {
+  // Preflight response (required for cross-site POST)
+  return new Response(null, { status: 204, headers: corsHeaders });
+}
+
 export async function POST(req) {
   try {
     const formData = await req.formData();
 
     const unityDealId = formData.get("unity_deal_id");
-
     const proofOfId = formData.get("proof_of_id");
     const proofOfAddress = formData.get("proof_of_address");
     const proofOfFunds = formData.get("proof_of_funds");
@@ -18,19 +28,12 @@ export async function POST(req) {
           proof_of_funds: proofOfFunds?.name || null,
         },
       }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
     return new Response(
       JSON.stringify({ ok: false, error: err.message }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-}
-
-export async function GET() {
-  return new Response(
-    JSON.stringify({ ok: false, error: "Use POST" }),
-    { status: 405, headers: { "Content-Type": "application/json" } }
-  );
 }
