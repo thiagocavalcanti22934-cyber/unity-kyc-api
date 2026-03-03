@@ -12,9 +12,11 @@ export async function OPTIONS() {
 
 export async function POST(req) {
   try {
+    // --- ENV ---
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    const bucket = process.env.SUPABASE_BUCKET || "kyc";
+    const bucket = process.env.SUPABASE_BUCKET || "KYC"; // you currently use "KYC"
+    const hubspotToken = process.env.HUBSPOT_ACCESS_TOKEN;
 
     if (!supabaseUrl || !supabaseKey) {
       return new Response(
@@ -22,9 +24,16 @@ export async function POST(req) {
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+    if (!hubspotToken) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Missing HUBSPOT_ACCESS_TOKEN" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
+    // --- Read form ---
     const formData = await req.formData();
     const unityDealId = formData.get("unity_deal_id");
 
@@ -35,13 +44,11 @@ export async function POST(req) {
       );
     }
 
+    // --- Upload helpers ---
     async function uploadOne(fieldName, folderName) {
       const file = formData.get(fieldName);
-      if (!(file instanceof File) || file.size === 0) {
-        return null;
-      }
+      if (!(file instanceof File) || file.size === 0) return null;
 
-      // Safe-ish filename
       const original = (file.name || "file").replace(/[^\w.\-]+/g, "_");
       const path = `kyc/${unityDealId}/${folderName}/${Date.now()}_${original}`;
 
@@ -68,19 +75,98 @@ export async function POST(req) {
       return path;
     }
 
+    // --- 1) Upload to Supabase ---
     const proofOfIdPath = await uploadOne("proof_of_id", "proof_of_id");
     const proofOfAddressPath = await uploadOne("proof_of_address", "proof_of_address");
     const proofOfFundsPath = await uploadOne("proof_of_funds", "proof_of_funds");
+
+    // --- 2) Find HubSpot deal by unity_deal_id ---
+    const searchRes = await fetch("https://api.hubapi.com/crm/v3/objects/deals/search", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${hubspotToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filterGroups: [
+          {
+            filters: [
+              {
+                propertyName: "unity_deal_id",
+                operator: "EQ",
+                value: unityDealId,
+              },
+            ],
+          },
+        ],
+        properties: ["unity_deal_id"],
+        limit: 2,
+      }),
+    });
+
+    const searchText = await searchRes.text();
+    if (!searchRes.ok) {
+      throw new Error(`HubSpot search failed: ${searchRes.status} ${searchText}`);
+    }
+
+    const searchJson = JSON.parse(searchText);
+    const results = Array.isArray(searchJson.results) ? searchJson.results : [];
+
+    if (results.length === 0) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: `No HubSpot deal found for unity_deal_id=${unityDealId}`,
+          uploaded: { proof_of_id: proofOfIdPath, proof_of_address: proofOfAddressPath, proof_of_funds: proofOfFundsPath },
+        }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (results.length > 1) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: `Multiple HubSpot deals found for unity_deal_id=${unityDealId}. Must be unique.`,
+          uploaded: { proof_of_id: proofOfIdPath, proof_of_address: proofOfAddressPath, proof_of_funds: proofOfFundsPath },
+        }),
+        { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const hubspotDealId = results[0].id;
+
+    // --- 3) Update HubSpot deal properties with Supabase paths ---
+    const propertiesToUpdate = {};
+    if (proofOfIdPath) propertiesToUpdate.kyc_proof_of_id = proofOfIdPath;
+    if (proofOfAddressPath) propertiesToUpdate.kyc_proof_of_address = proofOfAddressPath;
+    if (proofOfFundsPath) propertiesToUpdate.kyc_proof_of_funds = proofOfFundsPath;
+
+    const updateRes = await fetch(`https://api.hubapi.com/crm/v3/objects/deals/${hubspotDealId}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${hubspotToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ properties: propertiesToUpdate }),
+    });
+
+    const updateText = await updateRes.text();
+    if (!updateRes.ok) {
+      throw new Error(`HubSpot update failed: ${updateRes.status} ${updateText}`);
+    }
 
     return new Response(
       JSON.stringify({
         ok: true,
         unity_deal_id: unityDealId,
+        hubspot_deal_id: hubspotDealId,
         uploaded: {
           proof_of_id: proofOfIdPath,
           proof_of_address: proofOfAddressPath,
           proof_of_funds: proofOfFundsPath,
         },
+        hubspot_updated_properties: propertiesToUpdate,
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
