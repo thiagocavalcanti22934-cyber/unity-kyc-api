@@ -70,8 +70,7 @@ export async function POST(req) {
     const phone = (formData.get("phone") || "").toString().trim();
     const additionalInfo = (formData.get("additional_info") || "").toString().trim();
 
-    // Radio group: you said data-name="title_radio"
-    // This will be the key ONLY if the radio inputs have name="title_radio"
+    // Radio group
     const titleRadio = (formData.get("title_radio") || "").toString().trim();
 
     // Name = Radio value + space + #name
@@ -102,7 +101,7 @@ export async function POST(req) {
       throw new Error(`Submission insert failed: ${submissionErr.message}`);
     }
 
-    // --- Upload helper (returns path + signedUrl) ---
+    // --- Upload helper ---
     async function uploadOne(fieldName, folderName) {
       const file = formData.get(fieldName);
       if (!(file instanceof File) || file.size === 0) return null;
@@ -130,8 +129,8 @@ export async function POST(req) {
 
       if (dbErr) throw new Error(`DB insert failed for ${fieldName}: ${dbErr.message}`);
 
-      // Signed URL (30 days)
       const expiresIn = 60 * 60 * 24 * 30;
+
       const { data: signed, error: signErr } = await supabase.storage
         .from(bucket)
         .createSignedUrl(path, expiresIn);
@@ -141,12 +140,12 @@ export async function POST(req) {
       return { path, signedUrl: signed.signedUrl };
     }
 
-    // --- 1) Upload to Supabase ---
+    // --- Upload to Supabase ---
     const proofOfId = await uploadOne("proof_of_id", "proof_of_id");
     const proofOfAddress = await uploadOne("proof_of_address", "proof_of_address");
     const proofOfFunds = await uploadOne("proof_of_funds", "proof_of_funds");
 
-    // --- 2) Find HubSpot deal by unity_deal_id ---
+    // --- Find HubSpot deal ---
     const searchRes = await fetch("https://api.hubapi.com/crm/v3/objects/deals/search", {
       method: "POST",
       headers: {
@@ -204,11 +203,13 @@ export async function POST(req) {
 
     const hubspotDealId = results[0].id;
 
-    // --- 3) Update HubSpot deal properties with SIGNED URLs ---
+    // --- Update HubSpot ---
     const propertiesToUpdate = {};
     if (proofOfId) propertiesToUpdate.kyc_proof_of_id = proofOfId.signedUrl;
     if (proofOfAddress) propertiesToUpdate.kyc_proof_of_address = proofOfAddress.signedUrl;
     if (proofOfFunds) propertiesToUpdate.kyc_proof_of_funds = proofOfFunds.signedUrl;
+
+    if (additionalInfo) propertiesToUpdate.kyc_additional_notes = additionalInfo;
 
     const updateRes = await fetch(`https://api.hubapi.com/crm/v3/objects/deals/${hubspotDealId}`, {
       method: "PATCH",
